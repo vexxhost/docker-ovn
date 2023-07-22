@@ -47,7 +47,7 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name == 'push' }}
         tags: |-
-          quay.io/vexxhost/ovn-central:${{ matrix.version }}
+          quay.io/vexxhost/ovn-central:${{ matrix.tag }}
         build-args: |-
           FROM=${{ matrix.from }}
           VERSION=${{ matrix.version }}
@@ -61,7 +61,7 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name == 'push' }}
         tags: |-
-          quay.io/vexxhost/ovn-host:${{ matrix.version }}
+          quay.io/vexxhost/ovn-host:${{ matrix.tag }}
         build-args: |-
           FROM=${{ matrix.from }}
           VERSION=${{ matrix.version }}
