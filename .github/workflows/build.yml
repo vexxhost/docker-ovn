@@ -17,8 +17,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - from: fedora:38
-          version: 23.06.0
+        - from: ubuntu:jammy
+          release: antelope
+          tag: 23.03.0
     steps:
     - name: Install QEMU static binaries
       uses: docker/setup-qemu-action@v2
@@ -41,8 +42,8 @@ jobs:
       uses: docker/build-push-action@v3
       with:
         target: ovn-central
-        cache-from: type=gha,scope=${{ matrix.from }}-${{ matrix.version }}-central
-        cache-to: type=gha,mode=max,scope=${{ matrix.from }}-${{ matrix.version }}-central
+        cache-from: type=gha,scope=${{ matrix.from }}-${{ matrix.release }}-${{ matrix.tag }}-central
+        cache-to: type=gha,mode=max,scope=${{ matrix.from }}-${{ matrix.release }}-${{ matrix.tag }}-central
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name == 'push' }}
         tags: |-
@@ -55,8 +56,8 @@ jobs:
       uses: docker/build-push-action@v3
       with:
         target: ovn-host
-        cache-from: type=gha,scope=${{ matrix.from }}-${{ matrix.version }}-host
-        cache-to: type=gha,mode=max,scope=${{ matrix.from }}-${{ matrix.version }}-host
+        cache-from: type=gha,scope=${{ matrix.from }}-${{ matrix.release }}-${{ matrix.tag }}-host
+        cache-to: type=gha,mode=max,scope=${{ matrix.from }}-${{ matrix.release }}-${{ matrix.tag }}-host
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name == 'push' }}
         tags: |-
