@@ -50,7 +50,7 @@ jobs:
           quay.io/vexxhost/ovn-central:${{ matrix.tag }}
         build-args: |-
           FROM=${{ matrix.from }}
-          VERSION=${{ matrix.version }}
+          RELEASE=${{ matrix.release }}
 
     - name: Build image (ovn-host)
       uses: docker/build-push-action@v3
@@ -64,4 +64,4 @@ jobs:
           quay.io/vexxhost/ovn-host:${{ matrix.tag }}
         build-args: |-
           FROM=${{ matrix.from }}
-          VERSION=${{ matrix.version }}
+          RELEASE=${{ matrix.release }}
