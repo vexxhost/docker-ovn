@@ -77,6 +77,7 @@ ARG TARGETPLATFORM
 ADD --chmod=755 https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETPLATFORM}/kubectl /usr/local/bin/kubectl
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
+        iproute2 \
         libbpf1 \
         libnuma1 \
         libunbound8 \
