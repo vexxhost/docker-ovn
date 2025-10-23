@@ -1,0 +1,117 @@
+From 436694505d79fbde4d7dcad67dc639bef6f6c4bf Mon Sep 17 00:00:00 2001
+From: Numan Siddique <numans@ovn.org>
+Date: Mon, 16 Dec 2024 10:26:26 -0800
+Subject: [PATCH 3/4] pinctrl: Use ovs_mutex_trylock() in the pinctrl thread.
+
+When the ovn-controller main thread has locked the pinctrl mutex,
+pinctrl thread will not be able to process packet-ins (like DHCP,
+DNS and few others) since it tries to acquire this mutex for
+other purposes (besides packet-in processing) - like ip_mcast
+snoop run and svc monitor runs etc.  Its better to try
+acquiring this mutex so that we can continue processing
+the packet-ins which don't require this mutex.
+
+Acked-by: Ales Musil <amusil@redhat.com>
+Signed-off-by: Numan Siddique <numans@ovn.org>
+(cherry picked from commit d71c451993416d76e251c08ed06193610cb66b99)
+---
+ controller/pinctrl.c | 69 +++++++++++++++++++++++++++-----------------
+ 1 file changed, 42 insertions(+), 27 deletions(-)
+
+diff --git a/controller/pinctrl.c b/controller/pinctrl.c
+index dc59b0cf5..ff6097633 100644
+--- a/controller/pinctrl.c
++++ b/controller/pinctrl.c
+@@ -3364,11 +3364,15 @@ pinctrl_handler(void *arg_)
+ 
+     while (!latch_is_set(&pctrl->pinctrl_thread_exit)) {
+         long long int bfd_time = LLONG_MAX;
++        bool lock_failed = false;
+ 
+-        ovs_mutex_lock(&pinctrl_mutex);
+-        pinctrl_rconn_setup(swconn, pctrl->br_int_name);
+-        ip_mcast_snoop_run();
+-        ovs_mutex_unlock(&pinctrl_mutex);
++        if (!ovs_mutex_trylock(&pinctrl_mutex)) {
++            pinctrl_rconn_setup(swconn, pctrl->br_int_name);
++            ip_mcast_snoop_run();
++            ovs_mutex_unlock(&pinctrl_mutex);
++        } else {
++            lock_failed = true;
++        }
+ 
+         rconn_run(swconn);
+         new_seq = seq_read(pinctrl_handler_seq);
+@@ -3393,35 +3397,46 @@ pinctrl_handler(void *arg_)
+             }
+ 
+             if (may_inject_pkts()) {
+-                ovs_mutex_lock(&pinctrl_mutex);
+-                send_garp_rarp_run(swconn, &send_garp_rarp_time);
+-                send_ipv6_ras(swconn, &send_ipv6_ra_time);
+-                send_ipv6_prefixd(swconn, &send_prefixd_time);
+-                send_mac_binding_buffered_pkts(swconn);
+-                bfd_monitor_send_msg(swconn, &bfd_time);
+-                ovs_mutex_unlock(&pinctrl_mutex);
+-
++                if (!ovs_mutex_trylock(&pinctrl_mutex)) {
++                    send_garp_rarp_run(swconn, &send_garp_rarp_time);
++                    send_ipv6_ras(swconn, &send_ipv6_ra_time);
++                    send_ipv6_prefixd(swconn, &send_prefixd_time);
++                    send_mac_binding_buffered_pkts(swconn);
++                    bfd_monitor_send_msg(swconn, &bfd_time);
++                    ovs_mutex_unlock(&pinctrl_mutex);
++                } else {
++                    lock_failed = true;
++                }
+                 ip_mcast_querier_run(swconn, &send_mcast_query_time);
+             }
+ 
+-            ovs_mutex_lock(&pinctrl_mutex);
+-            svc_monitors_run(swconn, &svc_monitors_next_run_time);
+-            ovs_mutex_unlock(&pinctrl_mutex);
++            if (!ovs_mutex_trylock(&pinctrl_mutex)) {
++                svc_monitors_run(swconn, &svc_monitors_next_run_time);
++                ovs_mutex_unlock(&pinctrl_mutex);
++            } else {
++                lock_failed = true;
++            }
+         }
+ 
+-        rconn_run_wait(swconn);
+-        rconn_recv_wait(swconn);
+-        if (rconn_is_connected(swconn)) {
+-            send_garp_rarp_wait(send_garp_rarp_time);
+-            ipv6_ra_wait(send_ipv6_ra_time);
+-            ip_mcast_querier_wait(send_mcast_query_time);
+-            svc_monitors_wait(svc_monitors_next_run_time);
+-            ipv6_prefixd_wait(send_prefixd_time);
+-            bfd_monitor_wait(bfd_time);
+-        }
+-        seq_wait(pinctrl_handler_seq, new_seq);
++        if (lock_failed) {
++            /* Wait for 5 msecs before waking to avoid degrading the
++             * lock to a spinlock. */
++            poll_timer_wait_until(5);
++        } else {
++            rconn_run_wait(swconn);
++            rconn_recv_wait(swconn);
++            if (rconn_is_connected(swconn)) {
++                send_garp_rarp_wait(send_garp_rarp_time);
++                ipv6_ra_wait(send_ipv6_ra_time);
++                ip_mcast_querier_wait(send_mcast_query_time);
++                svc_monitors_wait(svc_monitors_next_run_time);
++                ipv6_prefixd_wait(send_prefixd_time);
++                bfd_monitor_wait(bfd_time);
++            }
++            seq_wait(pinctrl_handler_seq, new_seq);
+ 
+-        latch_wait(&pctrl->pinctrl_thread_exit);
++            latch_wait(&pctrl->pinctrl_thread_exit);
++        }
+         poll_block();
+     }
+ 
+-- 
+2.51.0
+

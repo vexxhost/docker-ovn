@@ -39,7 +39,8 @@ RUN apt-get update && \
         libunbound-dev \
         make \
         openssl \
-        python3
+        python3 \
+        quilt
 ARG OVN_COMMIT=4fa78fa1f9316f23b138f58e7657030596fb0f9d
 ADD https://github.com/ovn-org/ovn.git#${OVN_COMMIT} /src/ovn
 WORKDIR /src/ovn/ovs
@@ -51,6 +52,12 @@ RUN --network=none \
         --sysconfdir=/etc
 RUN --network=none make -j$(nproc)
 WORKDIR /src/ovn
+COPY patches/ovn /patches
+RUN --network=none \
+    QUILT_PATCHES=/patches \
+    QUILT_PC=/src/.pc \
+    QUILT_PATCH_OPTS="--unified -p1" \
+    quilt push -a --fuzz=0 --leave-rejects
 RUN --network=none ./boot.sh
 RUN --network=none \
     ./configure \

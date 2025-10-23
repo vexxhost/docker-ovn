@@ -1,0 +1,665 @@
+From 470564ad73dbcd7c656c69d124d9f0ea6a78411e Mon Sep 17 00:00:00 2001
+From: Numan Siddique <numans@ovn.org>
+Date: Wed, 9 Oct 2024 15:31:40 -0400
+Subject: [PATCH 1/4] ovn-controller: Add a separate dns cache module and I-P
+ for SB DNS.
+
+Presently,
+  - Any changes to SB DNS, results in full recompute of lflow_output
+    engine node (which can be expensive).
+
+  - DNS internal cache is maintained by pinctrl module and because of
+    pinctrl mutex, DNS repsonder handling in the pinctrl thread
+    can get delayed if the mutex is held by ovn-controller main
+    thread and may result in DNS timeouts for the VIFs.
+
+This patch addressed these concerns by
+
+ - Removing the sb_dns as input to lflow_output engine node as it is
+   not required at all.
+
+ - maintaining a separate DNS cache in a separate module.  DNS cache is
+   now updated incrementally with the new engine node 'en_dns_cache' for
+   any changes to the SB DNS table.  A separate mutex - dns_cache_mutex
+   is used to protect the DNS cache.
+
+pinctrl_run() no longer maintains the DNS cache and it doesn't need
+to iterate all the SB DNS rows anymore.  This patch also removes
+the 'dns_supports_ovn_owned' check in pinctrl as ovn-controller
+doesn't update the SB DNS options column.
+
+Reported-at: https://mail.openvswitch.org/pipermail/ovs-discuss/2024-October/053332.html
+Reported-by: Gavin McKee <gavmckee80@googlemail.com>
+Acked-by: Han Zhou <hzhou@ovn.org>
+Signed-off-by: Numan Siddique <numans@ovn.org>
+(cherry picked from commit 817d4e53e8faf9de79f43b16ca3f3fa5163c63d1)
+Signed-off-by: Mohammed Naser <mnaser@vexxhost.com>
+---
+ controller/automake.mk      |   4 +-
+ controller/ovn-controller.c |  47 +++++++-
+ controller/ovn-dns.c        | 233 ++++++++++++++++++++++++++++++++++++
+ controller/ovn-dns.h        |  29 +++++
+ controller/pinctrl.c        | 137 +--------------------
+ controller/pinctrl.h        |   1 -
+ 6 files changed, 313 insertions(+), 138 deletions(-)
+ create mode 100644 controller/ovn-dns.c
+ create mode 100644 controller/ovn-dns.h
+
+diff --git a/controller/automake.mk b/controller/automake.mk
+index 1b1b3aeb1..38651d15e 100644
+--- a/controller/automake.mk
++++ b/controller/automake.mk
+@@ -47,7 +47,9 @@ controller_ovn_controller_SOURCES = \
+ 	controller/mac-cache.h \
+ 	controller/mac-cache.c \
+ 	controller/statctrl.h \
+-	controller/statctrl.c
++	controller/statctrl.c \
++	controller/ovn-dns.c \
++	controller/ovn-dns.h
+ 
+ controller_ovn_controller_LDADD = lib/libovn.la $(OVS_LIBDIR)/libopenvswitch.la
+ man_MANS += controller/ovn-controller.8
+diff --git a/controller/ovn-controller.c b/controller/ovn-controller.c
+index 6b79f5ba8..54c735a3c 100644
+--- a/controller/ovn-controller.c
++++ b/controller/ovn-controller.c
+@@ -85,6 +85,7 @@
+ #include "mirror.h"
+ #include "mac-cache.h"
+ #include "statctrl.h"
++#include "ovn-dns.h"
+ 
+ VLOG_DEFINE_THIS_MODULE(main);
+ 
+@@ -3703,6 +3704,43 @@ en_mac_cache_cleanup(void *data)
+     hmap_destroy(&cache_data->fdbs);
+ }
+ 
++static void *
++en_dns_cache_init(struct engine_node *node OVS_UNUSED,
++                  struct engine_arg *arg OVS_UNUSED)
++{
++    ovn_dns_cache_init();
++    return NULL;
++}
++
++static void
++en_dns_cache_run(struct engine_node *node, void *data OVS_UNUSED)
++{
++    const struct sbrec_dns_table *dns_table =
++        EN_OVSDB_GET(engine_get_input("SB_dns", node));
++
++    ovn_dns_sync_cache(dns_table);
++
++    engine_set_node_state(node, EN_UPDATED);
++}
++
++static bool
++dns_cache_sb_dns_handler(struct engine_node *node, void *data OVS_UNUSED)
++{
++    const struct sbrec_dns_table *dns_table =
++        EN_OVSDB_GET(engine_get_input("SB_dns", node));
++
++    ovn_dns_update_cache(dns_table);
++
++    engine_set_node_state(node, EN_UPDATED);
++    return true;
++}
++
++static void
++en_dns_cache_cleanup(void *data OVS_UNUSED)
++{
++    ovn_dns_cache_destroy();
++}
++
+ /* Engine node which is used to handle the Non VIF data like
+  *   - OVS patch ports
+  *   - Tunnel ports and the related chassis information.
+@@ -5407,6 +5445,7 @@ main(int argc, char *argv[])
+     ENGINE_NODE(if_status_mgr, "if_status_mgr");
+     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
+     ENGINE_NODE(mac_cache, "mac_cache");
++    ENGINE_NODE(dns_cache, "dns_cache");
+ 
+ #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
+     SB_NODES
+@@ -5537,7 +5576,7 @@ main(int argc, char *argv[])
+      * process all changes. */
+     engine_add_input(&en_lflow_output, &en_sb_logical_dp_group,
+                      engine_noop_handler);
+-    engine_add_input(&en_lflow_output, &en_sb_dns, NULL);
++
+     engine_add_input(&en_lflow_output, &en_lb_data,
+                      lflow_output_lb_data_handler);
+     engine_add_input(&en_lflow_output, &en_sb_fdb,
+@@ -5596,6 +5635,11 @@ main(int argc, char *argv[])
+     engine_add_input(&en_mac_cache, &en_sb_port_binding,
+                      engine_noop_handler);
+ 
++    engine_add_input(&en_dns_cache, &en_sb_dns,
++                     dns_cache_sb_dns_handler);
++
++    engine_add_input(&en_controller_output, &en_dns_cache,
++                     NULL);
+     engine_add_input(&en_controller_output, &en_lflow_output,
+                      controller_output_lflow_output_handler);
+     engine_add_input(&en_controller_output, &en_pflow_output,
+@@ -6020,7 +6064,6 @@ main(int argc, char *argv[])
+                                     sbrec_igmp_group,
+                                     sbrec_ip_multicast,
+                                     sbrec_fdb_by_dp_key_mac,
+-                                    sbrec_dns_table_get(ovnsb_idl_loop.idl),
+                                     sbrec_controller_event_table_get(
+                                         ovnsb_idl_loop.idl),
+                                     sbrec_service_monitor_table_get(
+diff --git a/controller/ovn-dns.c b/controller/ovn-dns.c
+new file mode 100644
+index 000000000..cddbdcbe3
+--- /dev/null
++++ b/controller/ovn-dns.c
+@@ -0,0 +1,233 @@
++/* Copyright (c) 2024, Red Hat, Inc.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at:
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <config.h>
++
++/* OVS includes */
++#include "include/openvswitch/shash.h"
++#include "include/openvswitch/thread.h"
++#include "openvswitch/vlog.h"
++
++/* OVN includes. */
++#include "lib/ovn-sb-idl.h"
++#include "ovn-dns.h"
++
++VLOG_DEFINE_THIS_MODULE(ovndns);
++
++/* Internal DNS cache entry for each SB DNS record. */
++struct dns_data {
++    uint64_t *dps;
++    size_t n_dps;
++    struct smap records;
++    struct smap options;
++    bool delete;
++};
++
++/* shash of 'struct dns_data'. */
++static struct shash dns_cache_ = SHASH_INITIALIZER(&dns_cache_);
++
++/* Mutex to protect dns_cache_. */
++static struct ovs_mutex dns_cache_mutex = OVS_MUTEX_INITIALIZER;
++
++static void update_cache_with_dns_rec(const struct sbrec_dns *,
++                                      struct dns_data *,
++                                      const char *dns_id,
++                                      struct shash *dns_cache);
++void
++ovn_dns_cache_init(void)
++{
++}
++
++void
++ovn_dns_cache_destroy(void)
++{
++    ovs_mutex_lock(&dns_cache_mutex);
++    struct shash_node *iter;
++    SHASH_FOR_EACH_SAFE (iter, &dns_cache_) {
++        struct dns_data *d = iter->data;
++        shash_delete(&dns_cache_, iter);
++        smap_destroy(&d->records);
++        smap_destroy(&d->options);
++        free(d->dps);
++        free(d);
++    }
++    shash_destroy(&dns_cache_);
++    ovs_mutex_unlock(&dns_cache_mutex);
++}
++
++void
++ovn_dns_sync_cache(const struct sbrec_dns_table *dns_table)
++{
++    ovs_mutex_lock(&dns_cache_mutex);
++    struct shash_node *iter;
++    SHASH_FOR_EACH (iter, &dns_cache_) {
++        struct dns_data *d = iter->data;
++        d->delete = true;
++    }
++
++    const struct sbrec_dns *sbrec_dns;
++    SBREC_DNS_TABLE_FOR_EACH (sbrec_dns, dns_table) {
++        const char *dns_id = smap_get(&sbrec_dns->external_ids, "dns_id");
++        if (!dns_id) {
++            continue;
++        }
++
++        struct dns_data *dns_data = shash_find_data(&dns_cache_, dns_id);
++        if (!dns_data) {
++            dns_data = xmalloc(sizeof *dns_data);
++            smap_init(&dns_data->records);
++            smap_init(&dns_data->options);
++            shash_add(&dns_cache_, dns_id, dns_data);
++            dns_data->n_dps = 0;
++            dns_data->dps = NULL;
++        } else {
++            free(dns_data->dps);
++        }
++
++        dns_data->delete = false;
++
++        if (!smap_equal(&dns_data->records, &sbrec_dns->records)) {
++            smap_destroy(&dns_data->records);
++            smap_clone(&dns_data->records, &sbrec_dns->records);
++        }
++
++        if (!smap_equal(&dns_data->options, &sbrec_dns->options)) {
++            smap_destroy(&dns_data->options);
++            smap_clone(&dns_data->options, &sbrec_dns->options);
++        }
++
++        dns_data->n_dps = sbrec_dns->n_datapaths;
++        dns_data->dps = xcalloc(dns_data->n_dps, sizeof(uint64_t));
++        for (size_t i = 0; i < sbrec_dns->n_datapaths; i++) {
++            dns_data->dps[i] = sbrec_dns->datapaths[i]->tunnel_key;
++        }
++    }
++
++    SHASH_FOR_EACH_SAFE (iter, &dns_cache_) {
++        struct dns_data *d = iter->data;
++        if (d->delete) {
++            shash_delete(&dns_cache_, iter);
++            smap_destroy(&d->records);
++            smap_destroy(&d->options);
++            free(d->dps);
++            free(d);
++        }
++    }
++    ovs_mutex_unlock(&dns_cache_mutex);
++}
++
++void
++ovn_dns_update_cache(const struct sbrec_dns_table *dns_table)
++{
++    ovs_mutex_lock(&dns_cache_mutex);
++
++    const struct sbrec_dns *sbrec_dns;
++    SBREC_DNS_TABLE_FOR_EACH_TRACKED (sbrec_dns, dns_table) {
++        const char *dns_id = smap_get(&sbrec_dns->external_ids, "dns_id");
++        if (!dns_id) {
++            continue;
++        }
++
++        struct shash_node *shash_node = shash_find(&dns_cache_, dns_id);
++        if (sbrec_dns_is_deleted(sbrec_dns)) {
++            if (shash_node) {
++                struct dns_data *dns_data = shash_node->data;
++                shash_delete(&dns_cache_, shash_node);
++                smap_destroy(&dns_data->records);
++                smap_destroy(&dns_data->options);
++                free(dns_data->dps);
++                free(dns_data);
++            }
++        } else {
++            update_cache_with_dns_rec(sbrec_dns,
++                                      shash_node ? shash_node->data : NULL,
++                                      dns_id, &dns_cache_);
++        }
++    }
++
++    ovs_mutex_unlock(&dns_cache_mutex);
++}
++
++const char *
++ovn_dns_lookup(const char *query_name, uint64_t dp_key, bool *ovn_owned)
++{
++    ovs_mutex_lock(&dns_cache_mutex);
++
++    *ovn_owned = false;
++    struct shash_node *iter;
++    const char *answer_data = NULL;
++    SHASH_FOR_EACH (iter, &dns_cache_) {
++        struct dns_data *d = iter->data;
++            for (size_t i = 0; i < d->n_dps; i++) {
++            if (d->dps[i] == dp_key) {
++                /* DNS records in SBDB are stored in lowercase. Convert to
++                 * lowercase to perform case insensitive lookup
++                 */
++                char *query_name_lower = str_tolower(query_name);
++                answer_data = smap_get(&d->records, query_name_lower);
++                free(query_name_lower);
++                if (answer_data) {
++                    *ovn_owned = smap_get_bool(&d->options, "ovn-owned",
++                                               false);
++                    break;
++                }
++            }
++        }
++
++        if (answer_data) {
++            break;
++        }
++    }
++
++    ovs_mutex_unlock(&dns_cache_mutex);
++
++    return answer_data;
++}
++
++
++/* Static functions. */
++static void
++update_cache_with_dns_rec(const struct sbrec_dns *sbrec_dns,
++                          struct dns_data *dns_data,
++                          const char *dns_id,
++                          struct shash *dns_cache)
++{
++    if (!dns_data) {
++        dns_data = xmalloc(sizeof *dns_data);
++        smap_init(&dns_data->records);
++        smap_init(&dns_data->options);
++        shash_add(dns_cache, dns_id, dns_data);
++        dns_data->n_dps = 0;
++        dns_data->dps = NULL;
++    } else {
++        free(dns_data->dps);
++    }
++
++    if (!smap_equal(&dns_data->records, &sbrec_dns->records)) {
++        smap_destroy(&dns_data->records);
++        smap_clone(&dns_data->records, &sbrec_dns->records);
++    }
++
++    if (!smap_equal(&dns_data->options, &sbrec_dns->options)) {
++        smap_destroy(&dns_data->options);
++        smap_clone(&dns_data->options, &sbrec_dns->options);
++    }
++
++    dns_data->n_dps = sbrec_dns->n_datapaths;
++    dns_data->dps = xcalloc(dns_data->n_dps, sizeof(uint64_t));
++    for (size_t i = 0; i < sbrec_dns->n_datapaths; i++) {
++        dns_data->dps[i] = sbrec_dns->datapaths[i]->tunnel_key;
++    }
++}
+diff --git a/controller/ovn-dns.h b/controller/ovn-dns.h
+new file mode 100644
+index 000000000..8eca6ad0e
+--- /dev/null
++++ b/controller/ovn-dns.h
+@@ -0,0 +1,29 @@
++/* Copyright (c) 2024, Red Hat, Inc.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at:
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef OVN_DNS_H
++#define OVN_DNS_H
++
++struct shash;
++struct sbrec_dns_table;
++
++void ovn_dns_cache_init(void);
++void ovn_dns_cache_destroy(void);
++void ovn_dns_sync_cache(const struct sbrec_dns_table *);
++void ovn_dns_update_cache(const struct sbrec_dns_table *);
++const char *ovn_dns_lookup(const char *query_name, uint64_t dp_key,
++                           bool *ovn_owned);
++
++#endif /* OVN_DNS_H */
+diff --git a/controller/pinctrl.c b/controller/pinctrl.c
+index 3774544a8..dc59b0cf5 100644
+--- a/controller/pinctrl.c
++++ b/controller/pinctrl.c
+@@ -62,6 +62,7 @@
+ #include "vswitch-idl.h"
+ #include "lflow.h"
+ #include "ip-mcast.h"
++#include "ovn-dns.h"
+ 
+ VLOG_DEFINE_THIS_MODULE(pinctrl);
+ 
+@@ -79,13 +80,6 @@ VLOG_DEFINE_THIS_MODULE(pinctrl);
+  * A Mutex - 'pinctrl_mutex' is used between the pinctrl_handler() thread
+  * and pinctrl_run().
+  *
+- *   - dns_lookup -     In order to do a DNS lookup, this action needs
+- *                      to access the 'DNS' table. pinctrl_run() builds a
+- *                      local DNS cache - 'dns_cache'. See sync_dns_cache()
+- *                      for more details.
+- *                      The function 'pinctrl_handle_dns_lookup()' (which is
+- *                      called with in the pinctrl_handler thread) looks into
+- *                      the local DNS cache to resolve the DNS requests.
+  *
+  *   - put_arp/put_nd - These actions stores the IPv4/IPv6 and MAC addresses
+  *                      in the 'MAC_Binding' table.
+@@ -179,7 +173,6 @@ struct pinctrl {
+     struct latch pinctrl_thread_exit;
+     bool mac_binding_can_timestamp;
+     bool fdb_can_timestamp;
+-    bool dns_supports_ovn_owned;
+     bool igmp_group_has_chassis_name;
+ };
+ 
+@@ -2734,93 +2727,6 @@ put_be32(struct ofpbuf *buf, ovs_be32 x)
+     ofpbuf_put(buf, &x, sizeof x);
+ }
+ 
+-struct dns_data {
+-    uint64_t *dps;
+-    size_t n_dps;
+-    struct smap records;
+-    struct smap options;
+-    bool delete;
+-};
+-
+-static struct shash dns_cache = SHASH_INITIALIZER(&dns_cache);
+-
+-/* Called by pinctrl_run(). Runs within the main ovn-controller
+- * thread context. */
+-static void
+-sync_dns_cache(const struct sbrec_dns_table *dns_table)
+-    OVS_REQUIRES(pinctrl_mutex)
+-{
+-    struct shash_node *iter;
+-    SHASH_FOR_EACH (iter, &dns_cache) {
+-        struct dns_data *d = iter->data;
+-        d->delete = true;
+-    }
+-
+-    const struct sbrec_dns *sbrec_dns;
+-    SBREC_DNS_TABLE_FOR_EACH (sbrec_dns, dns_table) {
+-        const char *dns_id = smap_get(&sbrec_dns->external_ids, "dns_id");
+-        if (!dns_id) {
+-            continue;
+-        }
+-
+-        struct dns_data *dns_data = shash_find_data(&dns_cache, dns_id);
+-        if (!dns_data) {
+-            dns_data = xmalloc(sizeof *dns_data);
+-            smap_init(&dns_data->records);
+-            smap_init(&dns_data->options);
+-            shash_add(&dns_cache, dns_id, dns_data);
+-            dns_data->n_dps = 0;
+-            dns_data->dps = NULL;
+-        } else {
+-            free(dns_data->dps);
+-        }
+-
+-        dns_data->delete = false;
+-
+-        if (!smap_equal(&dns_data->records, &sbrec_dns->records)) {
+-            smap_destroy(&dns_data->records);
+-            smap_clone(&dns_data->records, &sbrec_dns->records);
+-        }
+-
+-        if (pinctrl.dns_supports_ovn_owned
+-            && !smap_equal(&dns_data->options, &sbrec_dns->options)) {
+-            smap_destroy(&dns_data->options);
+-            smap_clone(&dns_data->options, &sbrec_dns->options);
+-        }
+-
+-        dns_data->n_dps = sbrec_dns->n_datapaths;
+-        dns_data->dps = xcalloc(dns_data->n_dps, sizeof(uint64_t));
+-        for (size_t i = 0; i < sbrec_dns->n_datapaths; i++) {
+-            dns_data->dps[i] = sbrec_dns->datapaths[i]->tunnel_key;
+-        }
+-    }
+-
+-    SHASH_FOR_EACH_SAFE (iter, &dns_cache) {
+-        struct dns_data *d = iter->data;
+-        if (d->delete) {
+-            shash_delete(&dns_cache, iter);
+-            smap_destroy(&d->records);
+-            smap_destroy(&d->options);
+-            free(d->dps);
+-            free(d);
+-        }
+-    }
+-}
+-
+-static void
+-destroy_dns_cache(void)
+-{
+-    struct shash_node *iter;
+-    SHASH_FOR_EACH_SAFE (iter, &dns_cache) {
+-        struct dns_data *d = iter->data;
+-        shash_delete(&dns_cache, iter);
+-        smap_destroy(&d->records);
+-        smap_destroy(&d->options);
+-        free(d->dps);
+-        free(d);
+-    }
+-}
+-
+ /* Populates dns_answer struct with base data.
+  * Copy the answer section
+  * Format of the answer section is
+@@ -2898,7 +2804,6 @@ pinctrl_handle_dns_lookup(
+     struct rconn *swconn,
+     struct dp_packet *pkt_in, struct ofputil_packet_in *pin,
+     struct ofpbuf *userdata, struct ofpbuf *continuation)
+-    OVS_REQUIRES(pinctrl_mutex)
+ {
+     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+     enum ofp_version version = rconn_get_version(swconn);
+@@ -3003,31 +2908,9 @@ pinctrl_handle_dns_lookup(
+     uint32_t query_l4_size = rest - l4_start;
+ 
+     uint64_t dp_key = ntohll(pin->flow_metadata.flow.metadata);
+-    const char *answer_data = NULL;
+     bool ovn_owned = false;
+-    struct shash_node *iter;
+-    SHASH_FOR_EACH (iter, &dns_cache) {
+-        struct dns_data *d = iter->data;
+-        ovn_owned = smap_get_bool(&d->options, "ovn-owned", false);
+-        for (size_t i = 0; i < d->n_dps; i++) {
+-            if (d->dps[i] == dp_key) {
+-                /* DNS records in SBDB are stored in lowercase. Convert to
+-                 * lowercase to perform case insensitive lookup
+-                 */
+-                char *query_name_lower = str_tolower(ds_cstr(&query_name));
+-                answer_data = smap_get(&d->records, query_name_lower);
+-                free(query_name_lower);
+-                if (answer_data) {
+-                    break;
+-                }
+-            }
+-        }
+-
+-        if (answer_data) {
+-            break;
+-        }
+-    }
+-
++    const char *answer_data = ovn_dns_lookup(ds_cstr(&query_name), dp_key,
++                                             &ovn_owned);
+     ds_destroy(&query_name);
+     if (!answer_data) {
+         goto exit;
+@@ -3255,10 +3138,8 @@ process_packet_in(struct rconn *swconn, const struct ofp_header *msg)
+         break;
+ 
+     case ACTION_OPCODE_DNS_LOOKUP:
+-        ovs_mutex_lock(&pinctrl_mutex);
+         pinctrl_handle_dns_lookup(swconn, &packet, &pin, &userdata,
+                                   &continuation);
+-        ovs_mutex_unlock(&pinctrl_mutex);
+         break;
+ 
+     case ACTION_OPCODE_LOG:
+@@ -3595,15 +3476,6 @@ pinctrl_update(const struct ovsdb_idl *idl, const char *br_int_name)
+         notify_pinctrl_handler();
+     }
+ 
+-    bool dns_supports_ovn_owned = sbrec_server_has_dns_table_col_options(idl);
+-    if (dns_supports_ovn_owned != pinctrl.dns_supports_ovn_owned) {
+-        pinctrl.dns_supports_ovn_owned = dns_supports_ovn_owned;
+-
+-        /* Notify pinctrl_handler that fdb timestamp column
+-       * availability has changed. */
+-        notify_pinctrl_handler();
+-    }
+-
+     bool igmp_group_has_chassis_name =
+         sbrec_server_has_igmp_group_table_col_chassis_name(idl);
+     if (igmp_group_has_chassis_name != pinctrl.igmp_group_has_chassis_name) {
+@@ -3625,7 +3497,6 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+             struct ovsdb_idl_index *sbrec_igmp_groups,
+             struct ovsdb_idl_index *sbrec_ip_multicast_opts,
+             struct ovsdb_idl_index *sbrec_fdb_by_dp_key_mac,
+-            const struct sbrec_dns_table *dns_table,
+             const struct sbrec_controller_event_table *ce_table,
+             const struct sbrec_service_monitor_table *svc_mon_table,
+             const struct sbrec_mac_binding_table *mac_binding_table,
+@@ -3654,7 +3525,6 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+     prepare_ipv6_prefixd(ovnsb_idl_txn, sbrec_port_binding_by_name,
+                          local_active_ports_ipv6_pd, chassis,
+                          active_tunnels, local_datapaths);
+-    sync_dns_cache(dns_table);
+     controller_event_run(ovnsb_idl_txn, ce_table, chassis);
+     ip_mcast_sync(ovnsb_idl_txn, chassis, local_datapaths,
+                   sbrec_datapath_binding_by_key,
+@@ -4215,7 +4085,6 @@ pinctrl_destroy(void)
+     event_table_destroy();
+     destroy_put_mac_bindings();
+     destroy_put_vport_bindings();
+-    destroy_dns_cache();
+     ip_mcast_snoop_destroy();
+     destroy_svc_monitors();
+     bfd_monitor_destroy();
+diff --git a/controller/pinctrl.h b/controller/pinctrl.h
+index 2341403ba..da505d9bc 100644
+--- a/controller/pinctrl.h
++++ b/controller/pinctrl.h
+@@ -51,7 +51,6 @@ void pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                  struct ovsdb_idl_index *sbrec_igmp_groups,
+                  struct ovsdb_idl_index *sbrec_ip_multicast_opts,
+                  struct ovsdb_idl_index *sbrec_fdb_by_dp_key_mac,
+-                 const struct sbrec_dns_table *,
+                  const struct sbrec_controller_event_table *,
+                  const struct sbrec_service_monitor_table *,
+                  const struct sbrec_mac_binding_table *,
+-- 
+2.51.0
+
