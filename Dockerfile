@@ -77,11 +77,15 @@ ARG TARGETPLATFORM
 ADD --chmod=755 https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETPLATFORM}/kubectl /usr/local/bin/kubectl
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
-        libunbound8 && \
+        libbpf1 \
+        libnuma1 \
+        libunbound8 \
+        libxdp1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=ovn-kubernetes /src/ovn-kubernetes/dist/images/ovndb-raft-functions.sh /root/ovndb-raft-functions.sh
 COPY --from=ovn-kubernetes /src/ovn-kubernetes/dist/images/ovnkube.sh /root/ovnkube.sh
 COPY --from=ovn-kubernetes /ovn-kube-util /usr/bin/ovn-kube-util
 COPY --from=ovsinit /usr/local/cargo/bin/ovsinit /usr/local/bin/ovsinit
+COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-vsctl /usr/bin/ovs-vsctl
 COPY --from=ovn /out/ovn /
