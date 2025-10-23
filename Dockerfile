@@ -88,6 +88,7 @@ COPY --from=ovn-kubernetes /src/ovn-kubernetes/dist/images/ovndb-raft-functions.
 COPY --from=ovn-kubernetes /src/ovn-kubernetes/dist/images/ovnkube.sh /root/ovnkube.sh
 COPY --from=ovn-kubernetes /ovn-kube-util /usr/bin/ovn-kube-util
 COPY --from=ovsinit /usr/local/cargo/bin/ovsinit /usr/local/bin/ovsinit
+COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/share/openvswitch/scripts /usr/share/openvswitch/scripts
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-appctl /usr/bin/ovs-appctl
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-vsctl /usr/bin/ovs-vsctl
 COPY --from=ovn /out/ovn /
