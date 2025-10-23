@@ -69,8 +69,12 @@ RUN --network=none make -j$(nproc)
 RUN --network=none make install DESTDIR=/out/ovn
 
 FROM ${FROM}
+ENV OVS_USER_ID=42424
 RUN groupadd -r -g 42424 openvswitch && \
     useradd -r -g openvswitch -u 42424 openvswitch
+ARG KUBECTL_VERSION=v1.34.1
+ARG TARGETPLATFORM
+ADD --chmod=755 https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETPLATFORM}/kubectl /usr/local/bin/kubectl
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
         libunbound8 && \
