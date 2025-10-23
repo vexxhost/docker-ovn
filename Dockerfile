@@ -93,6 +93,7 @@ COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-appctl /usr/bin/ovs
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-ofctl /usr/bin/ovs-ofctl
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovs-vsctl /usr/bin/ovs-vsctl
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovsdb-client /usr/bin/ovsdb-client
+COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovsdb-server /usr/bin/ovsdb-server
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/bin/ovsdb-tool /usr/bin/ovsdb-tool
 COPY --from=ghcr.io/vexxhost/openvswitch:latest /usr/share/openvswitch/scripts /usr/share/openvswitch/scripts
 COPY --from=ovn /out/ovn /
