@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "local>vexxhost/.github"
+  ],
+  "prBodyDefinitions": {
+    "GitHub Links": "[Compare changes](https://github.com/{{{depName}}}/compare/{{{currentDigest}}}...{{{newDigest}}})"
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "Dockerfile"
+      ],
+      "matchStrings": [
+        "ARG OVN_COMMIT=(?<currentDigest>.*)"
+      ],
+      "datasourceTemplate": "git-refs",
+      "depNameTemplate": "ovn-org/ovn",
+      "currentValueTemplate": "branch-24.03",
+      "packageNameTemplate": "https://github.com/ovn-org/ovn"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchDatasources": [
+        "git-refs"
+      ],
+      "matchPackageNames": [
+        "https://github.com/**"
+      ],
+      "prBodyColumns": [
+        "Package",
+        "Update",
+        "Change",
+        "GitHub Links"
+      ]
+    }
+  ]
+}
