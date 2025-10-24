@@ -41,7 +41,7 @@ RUN apt-get update && \
         openssl \
         python3 \
         quilt
-ARG OVN_COMMIT=4fa78fa1f9316f23b138f58e7657030596fb0f9d
+ARG OVN_COMMIT=105c83b1d3928ce3039165e301e9a7744f3bff8d
 ADD https://github.com/ovn-org/ovn.git#${OVN_COMMIT} /src/ovn
 WORKDIR /src/ovn/ovs
 RUN --network=none ./boot.sh
