@@ -82,7 +82,8 @@ RUN apt-get update && \
         libnuma1 \
         libunbound8 \
         libxdp1 \
-        procps && \
+        procps \
+        uuid-runtime && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=ovn-kubernetes /src/ovn-kubernetes/dist/images/ovndb-raft-functions.sh /root/ovndb-raft-functions.sh
