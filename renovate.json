@@ -1,8 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "local>vexxhost/.github"
-  ],
+  "extends": ["local>vexxhost/docker-atmosphere"],
   "prBodyDefinitions": {
     "GitHub Links": "[Compare changes](https://github.com/{{{depName}}}/compare/{{{currentDigest}}}...{{{newDigest}}})"
   },
