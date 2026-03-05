@@ -3,7 +3,7 @@
 
 ARG FROM=debian:13.1@sha256:72547dd722cd005a8c2aa2079af9ca0ee93aad8e589689135feaed60b0a8c08d
 
-FROM rust:1.90 AS ovsinit
+FROM rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS ovsinit
 ARG ATMOSPHERE_REF=655208f1b53ab75c36864ed71dc543c30e21bd53
 ADD https://github.com/vexxhost/atmosphere.git#${ATMOSPHERE_REF} /src/ovsinit
 WORKDIR /src/ovsinit/crates/ovsinit
@@ -12,7 +12,7 @@ RUN cargo install --path .
 FROM runtime
 COPY --from=builder /usr/local/cargo/bin/ovsinit /usr/local/bin/ovsinit
 
-FROM golang:1.21 AS ovn-kubernetes
+FROM golang:1.21@sha256:4746d26432a9117a5f58e95cb9f954ddf0de128e9d5816886514199316e4a2fb AS ovn-kubernetes
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
         quilt
