@@ -12,7 +12,7 @@ RUN cargo install --path .
 FROM runtime
 COPY --from=builder /usr/local/cargo/bin/ovsinit /usr/local/bin/ovsinit
 
-FROM golang:1.21@sha256:4746d26432a9117a5f58e95cb9f954ddf0de128e9d5816886514199316e4a2fb AS ovn-kubernetes
+FROM golang:1.27@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS ovn-kubernetes
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
         quilt
