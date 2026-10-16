@@ -3,7 +3,7 @@
 
 ARG FROM=debian:13.1@sha256:72547dd722cd005a8c2aa2079af9ca0ee93aad8e589689135feaed60b0a8c08d
 
-FROM rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS ovsinit
+FROM rust:1.99@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a AS ovsinit
 ARG ATMOSPHERE_REF=655208f1b53ab75c36864ed71dc543c30e21bd53
 ADD https://github.com/vexxhost/atmosphere.git#${ATMOSPHERE_REF} /src/ovsinit
 WORKDIR /src/ovsinit/crates/ovsinit
